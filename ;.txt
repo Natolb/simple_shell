@@ -1,0 +1,274 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
+#define MAX_INPUT_SIZE 1024
+#define MAX_ARG_SIZE 64
+#define PROMPT ":) "
+
+extern char **environ; // Access to the external environment variables
+
+char *custom_getline(void);
+void display_prompt(void);
+char ***custom_tokenize(char *input);
+int custom_exit(char **args);
+int custom_setenv(char **args);
+int custom_unsetenv(char **args);
+int custom_cd(char **args);
+
+void execute_command(char **args);
+
+int main(void)
+{
+    char *input;
+    char ***commands;
+
+    while (1)
+    {
+        display_prompt();
+        input = custom_getline();
+
+        if (!input)
+            break;
+
+        commands = custom_tokenize(input);
+
+        for (int i = 0; commands[i] != NULL; i++)
+        {
+            execute_command(commands[i]);
+        }
+
+        // Free allocated memory
+        free(input);
+        for (int i = 0; commands[i] != NULL; i++)
+        {
+            for (int j = 0; commands[i][j] != NULL; j++)
+            {
+                free(commands[i][j]);
+            }
+            free(commands[i]);
+        }
+        free(commands);
+    }
+
+    return 0;
+}
+
+char *custom_getline(void)
+{
+    static char buffer[MAX_INPUT_SIZE];
+    static size_t pos = 0;
+
+    ssize_t read_chars;
+
+    // Reset buffer if it's the first call or we've reached the end
+    if (pos == 0)
+        memset(buffer, 0, MAX_INPUT_SIZE);
+
+    // Read characters into the buffer
+    read_chars = read(STDIN_FILENO, buffer + pos, MAX_INPUT_SIZE - pos);
+
+    // Check for errors or end of file
+    if (read_chars == -1 || read_chars == 0)
+        return NULL;
+
+    // Find the newline character or return if not found
+    char *newline = strchr(buffer + pos, '\n');
+    if (newline != NULL)
+    {
+        *newline = '\0'; // Replace newline with null terminator
+        pos = 0;         // Reset position for the next call
+        return buffer;
+    }
+
+    // Update position for the next call
+    pos += read_chars;
+
+    // If the buffer is full, consider it as a complete line
+    if (pos == MAX_INPUT_SIZE)
+    {
+        pos = 0; // Reset position for the next call
+        return buffer;
+    }
+
+    // If newline is not found yet, wait for more input
+    return custom_getline();
+}
+
+void display_prompt(void)
+{
+    write(STDOUT_FILENO, PROMPT, strlen(PROMPT));
+}
+
+char ***custom_tokenize(char *input)
+{
+    char ***commands = (char ***)malloc(MAX_ARG_SIZE * sizeof(char **));
+    if (!commands)
+    {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+    }
+
+    int i = 0;
+    char *token;
+    char *command_delimiter = ";";
+    char *arg_delimiter = " ";
+    char *saveptr1;
+    char *saveptr2;
+
+    // Tokenize the input into commands
+    token = strtok_r(input, command_delimiter, &saveptr1);
+    while (token != NULL)
+    {
+        commands[i] = (char **)malloc(MAX_ARG_SIZE * sizeof(char *));
+        if (!commands[i])
+        {
+            perror("malloc");
+            exit(EXIT_FAILURE);
+        }
+
+        int j = 0;
+        // Tokenize each command into arguments
+        char *arg = strtok_r(token, arg_delimiter, &saveptr2);
+        while (arg != NULL)
+        {
+            commands[i][j] = strdup(arg);
+            if (!commands[i][j])
+            {
+                perror("strdup");
+                exit(EXIT_FAILURE);
+            }
+            j++;
+
+            arg = strtok_r(NULL, arg_delimiter, &saveptr2);
+        }
+        commands[i][j] = NULL;
+
+        i++;
+
+        token = strtok_r(NULL, command_delimiter, &saveptr1);
+    }
+    commands[i] = NULL;
+
+    return commands;
+}
+
+void execute_command(char **args)
+{
+    if (args[0] != NULL)
+    {
+        if (strcmp(args[0], "exit") == 0)
+        {
+            int exit_status = custom_exit(args);
+            exit(exit_status);
+        }
+        else if (strcmp(args[0], "env") == 0)
+        {
+            char **env = environ;
+
+            // Print the current environment
+            while (*env != NULL)
+            {
+                printf("%s\n", *env);
+                env++;
+            }
+        }
+        else if (strcmp(args[0], "setenv") == 0)
+        {
+            custom_setenv(args);
+        }
+        else if (strcmp(args[0], "unsetenv") == 0)
+        {
+            custom_unsetenv(args);
+        }
+        else if (strcmp(args[0], "cd") == 0)
+        {
+            custom_cd(args);
+        }
+        else
+        {
+            pid_t pid = fork();
+            if (pid == 0)
+            {
+                /* Child process */
+                if (execvp(args[0], args) == -1)
+                {
+                    perror(args[0]);
+                    exit(EXIT_FAILURE);
+                }
+            }
+            else if (pid < 0)
+            {
+                perror("fork");
+                exit(EXIT_FAILURE);
+            }
+            else
+            {
+                /* Parent process */
+                int status;
+                waitpid(pid, &status, 0);
+
+                // Check for command not found
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 127)
+                {
+                    fprintf(stderr, "%s: command not found\n", args[0]);
+                }
+            }
+        }
+    }
+}
+
+int custom_exit(char **args)
+{
+    if (args[1] != NULL)
+    {
+        // If an exit status is provided, convert it to an integer
+        int exit_status = atoi(args[1]);
+        return exit_status;
+    }
+
+    return EXIT_SUCCESS;
+}
+
+int custom_setenv(char **args)
+{
+    if (args[1] != NULL && args[2] != NULL && args[3] == NULL)
+    {
+        // Set environment variable
+        if (setenv(args[1], args[2], 1) != 0)
+        {
+            perror("setenv");
+            fprintf(stderr, "Failed to set environment variable\n");
+        }
+    }
+    else
+    {
+        fprintf(stderr, "Usage: setenv VARIABLE VALUE\n");
+    }
+
+    return 0;
+}
+
+int custom_unsetenv(char **args)
+{
+    if (args[1] != NULL && args[2] == NULL)
+    {
+        // Unset environment variable
+        if (unsetenv(args[1]) != 0)
+        {
+            perror("unsetenv");
+            fprintf(stderr, "Failed to unset environment variable\n");
+        }
+    }
+    else
+    {
+        fprintf(stderr, "Usage: unsetenv VARIABLE\n");
+    }
+
+    return 0;
+}
+
+int custom
